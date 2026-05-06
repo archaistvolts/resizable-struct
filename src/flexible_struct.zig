@@ -11,7 +11,8 @@ pub fn FlexibleStruct(Layout: type) type {
         const alignment = if (!is_auto) Alignment.of(Layout) else blk: {
             var max: Alignment = .@"1";
             for (@typeInfo(Layout).@"struct".fields) |field| {
-                max = max.max(.fromByteUnits(field.alignment));
+                max = max.max(.fromByteUnits(field.alignment orelse
+                    @alignOf(ElementOf(field.type))));
             }
             break :blk max;
         };
@@ -31,7 +32,7 @@ pub fn FlexibleStruct(Layout: type) type {
         };
 
         /// A struct containing only the length fields that determine flexible array sizes.
-        pub const Lens = blk: {
+        pub const Lengths = blk: {
             var names: []const []const u8 = &.{};
             var types: []const type = &.{};
             var attrs: []const StructField.Attributes = &.{};
@@ -56,33 +57,35 @@ pub fn FlexibleStruct(Layout: type) type {
         };
 
         /// Returns a buffer type with compile-time known capacity sufficient to hold a flexible struct with the given lengths.
-        pub fn Buf(comptime capacity: Lens) type {
+        pub fn Buf(comptime capacity: Lengths) type {
             return [calcSize(capacity)]u8;
         }
 
+        pub const Field = FieldEnum(Layout);
+
         /// Initializes a flexible struct within an existing buffer. The array member contents remain uninitialized.
-        pub fn initBuffer(buf: []u8, lengths: Lens) *@This() {
+        pub fn initBuffer(buf: []u8, lengths: Lengths) *@This() {
             const size = calcSize(lengths);
             const aligned = std.mem.alignInBytes(buf, alignment.toByteUnits()).?;
             const bytes = aligned[0..size];
 
             const self: *@This() = @ptrCast(@alignCast(bytes.ptr));
-            inline for (@typeInfo(Lens).@"struct".fields) |f| {
-                const len_field = comptime stringToEnum(FieldEnum(Layout), f.name).?;
-                self.ptr(len_field).* = @field(lengths, f.name);
+            inline for (@typeInfo(Lengths).@"struct".fields) |f| {
+                self.ptr(stringToEnum(Field, f.name).?).* =
+                    @field(lengths, f.name);
             }
             return self;
         }
 
         /// Allocates and initializes a flexible struct on the heap. The array member contents remain uninitialized.
-        pub fn create(allocator: Allocator, lengths: Lens) Oom!*@This() {
+        pub fn create(allocator: Allocator, lengths: Lengths) Oom!*@This() {
             const size = calcSize(lengths);
             const bytes = try allocator.alignedAlloc(u8, alignment, size);
 
             const self: *@This() = @ptrCast(@alignCast(bytes.ptr));
-            inline for (@typeInfo(Lens).@"struct".fields) |f| {
-                const len_field = comptime stringToEnum(FieldEnum(Layout), f.name).?;
-                self.ptr(len_field).* = @field(lengths, f.name);
+            inline for (@typeInfo(Lengths).@"struct".fields) |f| {
+                self.ptr(stringToEnum(Field, f.name).?).* =
+                    @field(lengths, f.name);
             }
             return self;
         }
@@ -90,12 +93,16 @@ pub fn FlexibleStruct(Layout: type) type {
         /// Frees a flexible struct previously allocated with `create`. Calling this function on a struct allocated with `initBuffer` is illegal behavior.
         pub fn destroy(self: *@This(), allocator: Allocator) void {
             const size = calcSize(self.calcLens());
-            const bytes: [*]align(alignment.toByteUnits()) u8 = @ptrCast(@alignCast(self));
+            const bytes: [*]align(alignment.toByteUnits()) u8 =
+                @ptrCast(@alignCast(self));
             allocator.free(bytes[0..size]);
         }
 
         /// Returns a slice view of a flexible array field.
-        pub fn slice(self: *@This(), comptime field: FieldEnum(Layout)) SliceOf(field) {
+        pub fn slice(
+            self: *@This(),
+            comptime field: Field,
+        ) SliceOf(@FieldType(Layout, @tagName(field))) {
             const bytes: [*]u8 = @ptrCast(@alignCast(self));
             const offset = offsetOf(self, field);
             const size = sizeOf(self, field);
@@ -103,83 +110,83 @@ pub fn FlexibleStruct(Layout: type) type {
         }
 
         /// Returns a pointer to a field.
-        pub fn ptr(self: *@This(), comptime field: FieldEnum(Layout)) PtrOf(field) {
+        pub fn ptr(
+            self: *@This(),
+            comptime field: Field,
+        ) PtrOf(@FieldType(Layout, @tagName(field))) {
             const bytes: [*]u8 = @ptrCast(@alignCast(self));
             const offset = offsetOf(self, field);
             return @ptrCast(@alignCast(bytes + offset));
         }
 
         /// Returns the number of elements in a field.
-        pub fn len(self: *const @This(), comptime field: FieldEnum(Layout)) usize {
+        pub fn len(self: *const @This(), comptime field: Field) usize {
             const T = @FieldType(Layout, @tagName(field));
             return if (isFlexibleArray(T)) lenOf(self, field) else 1;
         }
 
-        fn SliceOf(comptime field: FieldEnum(Layout)) type {
-            return []ElementOf(field);
+        fn SliceOf(T: type) type {
+            return []ElementOf(T);
         }
 
-        fn PtrOf(comptime field: FieldEnum(Layout)) type {
-            const T = @FieldType(Layout, @tagName(field));
+        fn PtrOf(T: type) type {
             return if (isFlexibleArray(T)) [*]T.Element else *T;
         }
 
-        fn LenOf(comptime field: FieldEnum(Layout)) type {
-            const T = @FieldType(Layout, @tagName(field));
-            return if (isFlexibleArray(T)) @FieldType(Layout, @tagName(lenFieldOf(field))) else usize;
+        fn LenOf(T: type) type {
+            return if (isFlexibleArray(T))
+                @FieldType(Layout, @tagName(T.len_field))
+            else
+                u8;
         }
 
-        fn ElementOf(comptime field: FieldEnum(Layout)) type {
-            const T = @FieldType(Layout, @tagName(field));
+        fn ElementOf(T: type) type {
             return if (isFlexibleArray(T)) T.Element else T;
         }
 
-        inline fn lenFieldOf(comptime field: FieldEnum(Layout)) FieldEnum(Layout) {
-            const T = @FieldType(Layout, @tagName(field));
-            return T.len_field;
-        }
-
-        fn lenOf(self: *const @This(), comptime field: FieldEnum(Layout)) LenOf(field) {
+        fn lenOf(
+            self: *const @This(),
+            comptime field: Field,
+        ) LenOf(@FieldType(Layout, @tagName(field))) {
             const T = @FieldType(Layout, @tagName(field));
 
             if (!isFlexibleArray(T)) return 1;
 
-            const len_field = lenFieldOf(field);
+            const len_field = @FieldType(Layout, @tagName(field)).len_field;
             const offset = self.offsetOf(len_field);
             const size = self.sizeOf(len_field);
 
             const bytes: [*]const u8 = @ptrCast(self);
-            const len_ptr: *const LenOf(field) = @ptrCast(@alignCast(bytes[offset..][0..size]));
+            const len_ptr: *const LenOf(T) =
+                @ptrCast(@alignCast(bytes[offset..][0..size]));
 
             return len_ptr.*;
         }
 
-        fn sizeOf(self: *const @This(), comptime field: FieldEnum(Layout)) usize {
-            const Field = @FieldType(Layout, @tagName(field));
+        fn sizeOf(self: *const @This(), comptime field: Field) usize {
+            const F = @FieldType(Layout, @tagName(field));
 
-            if (isFlexibleArray(Field)) {
-                const length = lenOf(self, field);
-
-                return @sizeOf(Field.Element) * length;
-            } else {
-                return @sizeOf(Field);
-            }
+            return if (isFlexibleArray(F))
+                @sizeOf(F.Element) * lenOf(self, field)
+            else
+                return @sizeOf(F);
         }
 
-        fn offsetOf(head: *const @This(), comptime field: FieldEnum(Layout)) usize {
+        fn offsetOf(head: *const @This(), comptime field: Field) usize {
             var offset: usize = 0;
             inline for (sorted_fields) |f| {
                 const T = if (isFlexibleArray(f.type)) f.type.Element else f.type;
                 offset = std.mem.alignForward(usize, offset, @alignOf(T));
-                if (comptime std.mem.eql(u8, f.name, @tagName(field))) {
+
+                const this_field: Field = comptime stringToEnum(Field, f.name).?;
+                if (field == this_field)
                     return offset;
-                }
-                offset += sizeOf(head, stringToEnum(FieldEnum(Layout), f.name).?);
+                offset += sizeOf(head, this_field);
             }
             unreachable;
         }
 
-        fn calcSize(lengths: Lens) usize {
+        fn calcSize(lengths: Lengths) usize {
             var size: usize = 0;
             inline for (sorted_fields) |f| {
                 const T = if (isFlexibleArray(f.type)) f.type.Element else f.type;
@@ -196,11 +203,11 @@ pub fn FlexibleStruct(Layout: type) type {
             return size;
         }
 
-        fn calcLens(self: *@This()) Lens {
-            var result: Lens = undefined;
-            inline for (@typeInfo(Lens).@"struct".fields) |f| {
-                const len_field = comptime stringToEnum(FieldEnum(Layout), f.name).?;
-                @field(result, f.name) = self.ptr(len_field).*;
+        fn calcLens(self: *@This()) Lengths {
+            var result: Lengths = undefined;
+            inline for (@typeInfo(Lengths).@"struct".fields) |f| {
+                @field(result, f.name) =
+                    self.ptr(stringToEnum(Field, f.name).?).*;
             }
             return result;
         }
@@ -245,8 +252,10 @@ pub fn FlexibleStruct(Layout: type) type {
 /// which must be another field in the same struct.
 ///
 /// Multiple flexible arrays may reference the same length field.
+///
+/// Must be an extern struct to be usable in extern structs.
 pub fn FlexibleArray(comptime T: type, comptime length_field: @EnumLiteral()) type {
-    return struct {
+    return extern struct {
         const is_flexible_array = IsFlexibleArray{};
 
         const Element = T;
@@ -305,11 +314,13 @@ test "layout" {
     const well_defined = FlexibleStruct(extern struct {
         len: u8,
         arr: FlexibleArray(u64, .len),
+        len2: u8,
     });
 
     const not_well_defined = FlexibleStruct(struct {
         len: u8,
         arr: FlexibleArray(u64, .len),
+        len2: u8,
     });
 
     try testing.expect(well_defined.calcSize(.{ .len = 1 }) > not_well_defined.calcSize(.{ .len = 1 }));
