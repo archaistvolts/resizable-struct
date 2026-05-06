@@ -1,5 +1,3 @@
-//! copied with no changes from https://codeberg.org/ziglang/zig/pulls/30823
-
 /// A `FlexibleStruct` is a data structure where one or more fields are runtime sized arrays.
 pub fn FlexibleStruct(Layout: type) type {
     return struct {
@@ -176,7 +174,7 @@ pub fn FlexibleStruct(Layout: type) type {
             var offset: usize = 0;
             inline for (sorted_fields) |f| {
                 const T = if (isFlexibleArray(f.type)) f.type.Element else f.type;
-                offset = std.mem.alignForward(usize, offset, @alignOf(T));
+                offset = std.mem.alignForward(usize, offset, f.alignment orelse @alignOf(T));
 
                 const this_field: Field = comptime stringToEnum(Field, f.name).?;
                 if (field == this_field)
@@ -190,7 +188,7 @@ pub fn FlexibleStruct(Layout: type) type {
             var size: usize = 0;
             inline for (sorted_fields) |f| {
                 const T = if (isFlexibleArray(f.type)) f.type.Element else f.type;
-                size = std.mem.alignForward(usize, size, @alignOf(T));
+                size = std.mem.alignForward(usize, size, f.alignment orelse @alignOf(T));
                 if (isFlexibleArray(f.type)) {
                     const len_field_name = @tagName(f.type.len_field);
                     const length = @field(lengths, len_field_name);
@@ -324,4 +322,44 @@ test "layout" {
     });
 
     try testing.expect(well_defined.calcSize(.{ .len = 1 }) > not_well_defined.calcSize(.{ .len = 1 }));
+}
+
+fn alignFwd(n: usize, a: usize) usize {
+    return std.mem.alignForward(usize, n, a);
+}
+
+test "field alignment" {
+    const Layout = extern struct {
+        len: u32 align(32),
+        capacity: u32,
+        containers: FlexibleArray(u64, .capacity) align(32),
+        keys: FlexibleArray(u16, .capacity) align(32),
+    };
+    const RoaringArray = FlexibleStruct(Layout);
+
+    try testing.expectEqual(
+        160,
+        alignFwd(
+            4 + 4 +
+                alignFwd(8 * 10, 32) +
+                alignFwd(2 * 10, 32),
+            32,
+        ),
+    );
+
+    try testing.expectEqual(160, RoaringArray.calcSize(.{ .capacity = 10 }));
+    try testing.expectEqual(.@"32", std.mem.Alignment.of(Layout));
+    try testing.expectEqual(.@"32", RoaringArray.alignment);
+
+    var blocks = std.ArrayList(@Vector(32, u8)).empty;
+    try blocks.ensureTotalCapacityPrecise(testing.allocator, 10);
+    blocks.items.len = 10;
+    defer blocks.deinit(testing.allocator);
+    const ra = RoaringArray.initBuffer(@ptrCast(blocks.items), .{ .capacity = @intCast(blocks.items.len) });
+
+    try testing.expectEqual(0, ra.offsetOf(.len));
+    try testing.expectEqual(4, ra.offsetOf(.capacity));
+    try testing.expectEqual(32, ra.offsetOf(.containers));
+    try testing.expectEqual(128, alignFwd(4 + 4 + alignFwd(8 * 10, 32), 32));
+    try testing.expectEqual(128, ra.offsetOf(.keys));
 }
