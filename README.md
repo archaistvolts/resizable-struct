@@ -1,4 +1,4 @@
-# resizable-struct
+# flexible-struct
 
 This library provides types for creating structs with runtime sized array fields.
 
