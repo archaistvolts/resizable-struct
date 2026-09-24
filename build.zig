@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
 
     // Module
     const mod = b.addModule("flexible_struct", .{
-        .root_source_file = b.path("src/flexible_struct.zig"),
+        .root_source_file = b.path("src/flexible-struct.zig"),
         .target = target,
         .optimize = optimize,
     });
