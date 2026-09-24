@@ -1,4 +1,4 @@
-/// A `FlexibleStruct` is a data structure where one or more fields are runtime sized arrays.
+/// A `flexible.Struct` is a data structure where one or more fields are runtime sized arrays.
 pub fn Struct(Layout: type) type {
     return struct {
         _: void align(alignment.toByteUnits()),
@@ -99,21 +99,22 @@ pub fn Struct(Layout: type) type {
         /// Returns a slice view of a flexible array field with constness determined by self.
         pub fn slice(self: anytype, comptime field: Field) SliceOf(@TypeOf(self), field) {
             const bytes: [*]u8 = @ptrCast(@alignCast(self));
-            const offset = offsetOf(self, field);
-            const size = sizeOf(self, field);
+            const offset = self.offsetOf(field);
+            const size = self.sizeOf(field);
             return @ptrCast(@alignCast(bytes[offset..][0..size]));
         }
 
         /// Returns a pointer to a field with constness determined by self.
         pub fn ptr(self: anytype, comptime field: Field) PtrOf(@TypeOf(self), field) {
-            const offset = offsetOf(self, field);
+            const offset = self.offsetOf(field);
             return @ptrCast(@alignCast(self.asBytes() + offset));
         }
 
         /// Returns the number of elements in a field.
-        pub fn len(self: *const @This(), comptime field: Field) usize {
+        pub fn len(self: *const @This(), comptime field: Field) LenOf(field) {
             const T = @FieldType(Layout, @tagName(field));
-            return if (IsArray(T)) lenOf(self, field) else 1;
+            const len_field = @FieldType(Layout, @tagName(field)).len_field;
+            return if (IsArray(T)) self.ptr(len_field).* else 1;
         }
 
         pub fn SliceOf(S: type, field: Field) type {
@@ -152,7 +153,7 @@ pub fn Struct(Layout: type) type {
             return if (IsArray(T))
                 @FieldType(Layout, @tagName(T.len_field))
             else
-                u8;
+                usize;
         }
 
         /// returns self as an aligned u8 ptr with constness of self.
@@ -160,25 +161,10 @@ pub fn Struct(Layout: type) type {
             return @ptrCast(self);
         }
 
-        pub fn lenOf(self: *const @This(), comptime field: Field) LenOf(field) {
-            const T = @FieldType(Layout, @tagName(field));
-
-            if (!IsArray(T)) return 1;
-
-            const len_field = @FieldType(Layout, @tagName(field)).len_field;
-            const offset = self.offsetOf(len_field);
-            const size = self.sizeOf(len_field);
-
-            const len_ptr: *const LenOf(field) =
-                @ptrCast(@alignCast(self.asBytes()[offset..][0..size]));
-
-            return len_ptr.*;
-        }
-
         pub fn sizeOf(self: *const @This(), comptime field: Field) usize {
             const F = @FieldType(Layout, @tagName(field));
             return if (IsArray(F))
-                @sizeOf(F.Element) * lenOf(self, field)
+                @sizeOf(F.Element) * self.len(field)
             else
                 return @sizeOf(F);
         }
@@ -191,7 +177,7 @@ pub fn Struct(Layout: type) type {
                 const this_field: Field = @field(Field, f.name);
                 if (field == this_field)
                     return offset;
-                offset += sizeOf(head, this_field);
+                offset += head.sizeOf(this_field);
             }
             unreachable;
         }
@@ -233,37 +219,6 @@ pub fn Struct(Layout: type) type {
             }
         }
 
-        /// A struct of fields from Layout where flexible arrays are replaced by
-        /// `[*]Element` or `[*]const Element` according to caller constness.
-        pub const View = blk: {
-            var names: []const []const u8 = &.{};
-            var types: []const type = &.{};
-            var attrs: []const StructField.Attributes = &.{};
-            for (sorted_fields) |field| {
-                names = names ++ .{field.name};
-                types = types ++ .{if (IsArray(field.type)) [*]field.type.Element else field.type};
-                attrs = attrs ++ .{StructField.Attributes{
-                    .@"align" = field.alignment,
-                    .default_value_ptr = field.default_value_ptr,
-                    .@"comptime" = field.is_comptime,
-                }};
-            }
-            break :blk @Struct(@typeInfo(Layout).@"struct".layout, null, names, @ptrCast(types.ptr), @ptrCast(attrs.ptr));
-        };
-
-        /// a cached view
-        pub fn view(self: anytype) View {
-            var result: View = undefined;
-            inline for (sorted_fields) |f| {
-                const fieldptr = self.ptr(@field(Field, f.name));
-                @field(result, f.name) = if (IsArray(f.type))
-                    fieldptr
-                else
-                    fieldptr.*;
-            }
-            return result;
-        }
-
         test Buf {
             const Packet = Struct(struct {
                 host_len: usize,
@@ -298,7 +253,7 @@ pub fn Struct(Layout: type) type {
     };
 }
 
-/// Declares a flexible array field within a `FlexibleStruct` layout.
+/// Declares a flexible array field within a `flexible.Struct` layout.
 ///
 /// The array length is determined at runtime by the value of `length_field`,
 /// which must be another field in the same struct.
