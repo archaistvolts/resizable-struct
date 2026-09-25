@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Install docs into zig-out/docs");
     docs_step.dependOn(&docs.step);
+
+    const exe_check = b.addExecutable(.{ .name = "check", .root_module = mod });
+    const check = b.step("check", "Check if everything compiles");
+    check.dependOn(&exe_check.step);
+    check.dependOn(&unit_tests.step);
 }
 
 const std = @import("std");
