@@ -1,24 +1,24 @@
-//! # Features
-//!
-//! 1. Constant time field access.
-//! 1. APIs: Layout, Self and bytes.  Users can ptrCast between them.
-//! 1. Computed fields.
-//! 1. LSP cooperation. Avoid created/refified types which break autocomplete.
-//!
 //! # About
 //!
 //! A single buffer layout library for structs with flexible fields. User
-//! specified `Layout` fields (with order determined by zig) are first in
-//! memory. Flexible fields are second and sorted by descending alignment. This
-//! ordering with no padding between flexible fields allows flexible offsets to
-//! be calculated in constant time (see `calcOffsets()`).
+//! defined `Layout` fields are first in memory with order determined by Zig.
+//! Flexible fields are second and sorted by descending alignment. With no
+//! padding, flexible offsets can be calculated in constant time (see
+//! `calcOffsets()`).
+//!
+//! # Features
+//!
+//! 1. Support all structs: auto, extern, packed
+//! 1. Constant time field access.
+//! 1. APIs: Layout, Self and bytes.  Users can ptrCast between them.
+//! 1. Computed fields.
+//! 1. LSP cooperation. Avoid created/reified types which break autocomplete.
 //!
 //! # Cached Layout API
 //!
 //! The core methods `calcOffsetsLayout` and `flexibleCapacities` accept a
 //! Layout. Layouts are first class in addition to Self. Layout is user
-//! specified and usually easier to work with than a `@Struct` refied type. This
-//! library is Layout agnostic. Any zig struct will work.
+//! specified and allows customization unlike reified `@Struct` types.
 //!
 //! # Tradeoff
 //!
@@ -36,7 +36,7 @@
 //!
 //! # Use
 //!
-//! A Layout decl 'pub coonst flexible_array_capacities` maps flexible
+//! A Layout decl 'pub const flexible_array_capacities` maps flexible
 //! fields to their cached or computed capacities.
 //!
 //! ```zig
@@ -55,8 +55,8 @@
 //!     - remove inline loops and comptime params.
 //! - de/serialization helpers.
 //! - when fixed padding is large enough for a 'buffer_capacity' Size, add a
-//! managed API with resize, resizeAssumeCapacity, resizeBounded and a hidden
-//! field helper.
+//!   managed API with resize, resizeAssumeCapacity, resizeBounded and a hidden
+//!   field helper.
 
 pub const Options = struct {
     /// size used for offset calculations and methods such as `sizeInBytes`.
@@ -66,7 +66,7 @@ pub const Options = struct {
 
 pub fn Struct(LayoutT: type, options: Options) type {
     return struct {
-        /// align Self pointers so we can omit `align` attributes.
+        /// this aligns Self pointers so we can omit 'align' pointer attributes.
         _: void align(ALIGN),
 
         pub const Layout = LayoutT;
@@ -76,7 +76,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
         const fields_decls = meta.fieldNames(Field) ++ meta.fieldNames(Decl);
         const FieldOrDeclInt = @Int(
             .unsigned,
-            math.ceilPowerOfTwo(u16, @max(8, fields_decls.len)) catch unreachable, // u65536 should be enough fields and decls for everyone
+            math.ceilPowerOfTwo(usize, @max(8, fields_decls.len)) catch unreachable,
         );
         /// an enum of Layout field names followed by decl names.
         pub const FieldOrDecl = @Enum(FieldOrDeclInt, .exhaustive, fields_decls, &simd.iota(FieldOrDeclInt, fields_decls.len));
@@ -92,7 +92,6 @@ pub fn Struct(LayoutT: type, options: Options) type {
         const layout_field_sets = sets: {
             var flexibles = enums.EnumSet(Field).initEmpty();
             var capacities = enums.EnumSet(Field).initEmpty();
-            var computeds = enums.EnumSet(Decl).initEmpty();
             for (@typeInfo(@TypeOf(flexible_array_capacities)).@"struct".fields) |flexible| {
                 if (!@hasField(Field, flexible.name))
                     @compileError("'" ++ flexible.name ++ "' is not a Layout field.");
@@ -101,30 +100,27 @@ pub fn Struct(LayoutT: type, options: Options) type {
                 const capname = @tagName(capacity);
                 if (@hasField(Layout, capname) and @typeInfo(@FieldType(Layout, capname)) == .int)
                     capacities.insert(@field(Field, capname))
-                else if (@hasDecl(Layout, capname))
-                    computeds.insert(@field(Decl, capname))
-                else
+                else if (!@hasDecl(Layout, capname))
                     @compileError("flexible_array_capacities missing Layout field or declaration: '" ++ flexible.name ++ "'");
             }
-            break :sets .{ flexibles, capacities, computeds };
+            break :sets .{ flexibles, capacities };
         };
         const flexible_field_set = layout_field_sets[0];
         const capacity_field_set = layout_field_sets[1];
 
         const layout_infos = blk: {
             var maxalign: mem.Alignment = .of(Layout);
-            for (layout_fields) |field| { // must user
+            for (layout_fields) |field| {
                 maxalign = maxalign.max(.fromByteUnits(AlignOf(field)));
             }
             var flexsizes: FlexSizes = undefined;
             var nextflexaligns: FlexSizes = undefined;
             for (0..NFLEX_FIELDS) |i| {
-                const flexfield = flexible_field_ids[i];
-                const field = layout_fields[@intFromEnum(flexfield)];
-                nextflexaligns[i] = if (i < NFLEX_FIELDS - 1)
-                    AlignOf(layout_fields[@intFromEnum(flexfield) + 1])
+                const field = layout_fields[@intFromEnum(flexible_field_ids[i])];
+                nextflexaligns[i] = if (i < (NFLEX_FIELDS - 1))
+                    AlignOf(layout_fields[@intFromEnum(flexible_field_ids[i + 1])])
                 else
-                    maxalign.toByteUnits();
+                    1; // don't pad last field.  it must be done separately in calcOffsets.
                 flexsizes[i] = @sizeOf(ElementOf(@field(Field, field.name)));
             }
 
@@ -132,7 +128,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
         };
         const alignment = layout_infos[0];
         const flex_field_sizes = layout_infos[1];
-        /// `[2nd flexible field, ..., last flexible field, ALIGN]`.
+        /// `[2nd flexible field, ..., last flexible field, 1]`.
         ///
         /// first flexible align is statically known and omitted.
         const next_flexfield_aligns = layout_infos[2];
@@ -142,7 +138,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
         pub const Capacities = @Struct(
             .@"extern",
             null,
-            &filterFields(StructField, .name, mapSet(layout_fields, capacity_field_set)), // TODO remove inline loops everywhere - use sorted field order.
+            &mapFields(StructField, .name, filterSlice(layout_fields, capacity_field_set)),
             &@splat(Size),
             &@splat(.{}),
         );
@@ -156,7 +152,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
         };
         /// sorted by alignment desc
         const flexible_fields_sorted = fields: {
-            const fieldsraw = mapSet(layout_fields, flexible_field_set);
+            const fieldsraw = filterSlice(layout_fields, flexible_field_set);
             var fields = fieldsraw[0..fieldsraw.len].*;
             mem.sort(StructField, &fields, {}, Sort.lessThanAlign);
             break :fields fields;
@@ -227,10 +223,12 @@ pub fn Struct(LayoutT: type, options: Options) type {
                     \\sizes             {any}
                     \\sizesaligned      {any}
                     \\offsets           {any}
-                    \\base,Layout size  {}, {}
+                    \\ALIGN             {}
+                    \\FIRST_FLEX_OFFSET {}
+                    \\Layout size       {}
                     \\
                 ,
-                    .{ comptime meta.tags(Field), flex_field_sizes, next_flexfield_aligns, capacities, sizes, sizesaligned, offsets, FIRST_FLEX_OFFSET, @sizeOf(Layout) },
+                    .{ comptime meta.tags(Field), flex_field_sizes, next_flexfield_aligns, capacities, sizes, sizesaligned, offsets, ALIGN, FIRST_FLEX_OFFSET, @sizeOf(Layout) },
                 );
             }
             return offsets;
@@ -256,7 +254,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
         }
 
         /// size in bytes of layout. assumes layout capacities are initialized
-        /// along with other fields needed by computed methods.
+        /// along with any other fields needed by computed methods.
         pub fn sizeInBytesLayout(layout: *const Layout) Size {
             return if (NFLEX_FIELDS > 0)
                 calcOffsetsLayout(layout)[NFLEX_FIELDS - 1]
@@ -284,7 +282,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
 
         /// a copy of layout backed by buf and with flexible fields
         /// pointing into buf.
-        pub fn initBuffer(buf: []align(ALIGN) u8, layout: *const Layout) !*Self {
+        pub fn initBuffer(buf: []align(ALIGN) u8, layout: *const Layout) mem.Allocator.Error!*Self {
             const ret = mem.bytesAsValue(Layout, buf);
             ret.* = layout.*;
             if (NFLEX_FIELDS == 0)
@@ -312,7 +310,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
 
         /// a struct with given capacities backed by buf and with flexible fields
         /// pointing into buf.
-        pub fn initBufferCapacities(buf: []align(ALIGN) u8, capacities: *const Capacities) !*Self {
+        pub fn initBufferCapacities(buf: []align(ALIGN) u8, capacities: *const Capacities) mem.Allocator.Error!*Self {
             return try initBuffer(buf, &initCapacities(capacities));
         }
 
@@ -348,10 +346,10 @@ pub fn Struct(LayoutT: type, options: Options) type {
             return @bitCast(counts);
         }
 
-        pub fn create(allocator: mem.Allocator, capacities: *const Capacities) !*Self {
+        pub fn create(allocator: mem.Allocator, capacities: *const Capacities) mem.Allocator.Error!*Self {
             const layout = initCapacities(capacities);
             const buf = try allocator.alignedAlloc(u8, alignment, sizeInBytesLayout(&layout));
-            return initBuffer(buf, &layout);
+            return try initBuffer(buf, &layout);
         }
 
         pub fn destroy(self: *const Self, allocator: mem.Allocator) void {
@@ -511,7 +509,7 @@ pub fn Struct(LayoutT: type, options: Options) type {
     };
 }
 
-fn filterFields(T: type, field: meta.FieldEnum(T), in: []const T) [in.len]@FieldType(T, @tagName(field)) {
+fn mapFields(T: type, field: meta.FieldEnum(T), in: []const T) [in.len]@FieldType(T, @tagName(field)) {
     const F = @FieldType(T, @tagName(field));
     var out: [in.len]F = undefined;
     for (in, &out) |i, *o|
@@ -519,10 +517,10 @@ fn filterFields(T: type, field: meta.FieldEnum(T), in: []const T) [in.len]@Field
     return out;
 }
 
-fn mapSet(src: anytype, mask: anytype) []const meta.Elem(@TypeOf(src)) {
+fn filterSlice(src: anytype, set: anytype) []const meta.Elem(@TypeOf(src)) {
     var ret: []const meta.Elem(@TypeOf(src)) = &.{};
     for (src, 0..) |f, i| {
-        if (mask.contains(@enumFromInt(i)))
+        if (set.contains(@enumFromInt(i)))
             ret = ret ++ .{f};
     }
     return ret;
@@ -531,27 +529,31 @@ fn mapSet(src: anytype, mask: anytype) []const meta.Elem(@TypeOf(src)) {
 // TESTS
 
 test Struct {
-    const Model = Struct(struct {
+    const Layout = struct {
         capacity: u8,
         flexible: [*]u8 = undefined,
         computed: [*]u8 = undefined,
+
         pub const flexible_array_capacities = .{
             .flexible = .capacity,
             .computed = .computedLen,
         };
+
         pub fn computedLen(_: *const @This()) usize {
             return 68;
         }
-    }, .{});
-    const Layout = Model.Layout;
+    };
+
+    const Model = Struct(Layout, .{});
     const initlayout = Layout{ .capacity = 42 };
-    var buf: Model.Buf(&initlayout) align(Model.ALIGN) = undefined;
-    const layout = try Model.initBuffer(&buf, &initlayout);
-    try testing.expectEqual(42, layout.slice(.flexible).len);
-    try testing.expectEqual(42, layout.value(.capacity));
-    try testing.expectEqual(42, layout.asLayout().capacity); // Self <-> Layout
-    try testing.expectEqual(42, Model.fromLayout(layout.asLayout()).slice(.flexible).len); // Self <-> Layout
-    try testing.expectEqual(68, layout.slice(.computed).len); // computed
+    var buf: Model.Buf(&initlayout) align(Model.ALIGN) = undefined; // buffer must be aligned
+    const model = try Model.initBuffer(&buf, &initlayout);
+    try testing.expectEqual(42, model.value(.capacity));
+    try testing.expectEqual(42, model.slice(.flexible).len);
+    try testing.expectEqual(42, model.asLayout().capacity); // Self <-> Layout
+    try testing.expectEqual(42, Model.fromLayout(model.asLayout()).value(.capacity));
+    try testing.expectEqual(68, model.slice(.computed).len);
+    try testing.expectEqual(136, model.sizeInBytes()); // 24+42+68(~8)=134(~8)=136
 
     try testPacket(usize);
     try testPacket(u32);
@@ -592,7 +594,7 @@ fn testPacket(Size: type) !void {
     try testing.expectEqualSlices(Packet.Field, &.{ .write_buf, .read_buf, .host, .computed }, Packet.flexible_field_ids);
     try testing.expectEqualSlices(Packet.Field, &.{ .buf_lens, .host_len }, Packet.capacity_field_ids); // computed fields excluded
     try testing.expectEqualSlices(Packet.Size, &.{ 1, 1, 1, 1 }, &Packet.flex_field_sizes);
-    try testing.expectEqualSlices(Packet.Size, &.{ 16, 1, 1, 32 }, &Packet.next_flexfield_aligns);
+    try testing.expectEqualSlices(Packet.Size, &.{ 16, 1, 1, 1 }, &Packet.next_flexfield_aligns);
 
     const capacities: Packet.Capacities = .{ .buf_lens = 20, .host_len = host.len };
     try validateLayout(Packet, Packet.initCapacities(&capacities), &.{ 96, 116, 127, 224 });
