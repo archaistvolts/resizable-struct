@@ -1,68 +1,69 @@
+//! # Features
+//!
+//! 1. Constant time field access.
+//! 1. APIs: Layout, Self and bytes.  Users can ptrCast between them.
+//! 1. Computed fields.
+//! 1. LSP cooperation. Avoid created/refified types which break autocomplete.
+//!
+//! # About
+//!
+//! A single buffer layout library for structs with flexible fields. User
+//! specified `Layout` fields (with order determined by zig) are first in
+//! memory. Flexible fields are second and sorted by descending alignment. This
+//! ordering with no padding between flexible fields allows flexible offsets to
+//! be calculated in constant time (see `calcOffsets()`).
+//!
+//! # Cached Layout API
+//!
+//! The core methods `calcOffsetsLayout` and `flexibleCapacities` accept a
+//! Layout. Layouts are first class in addition to Self. Layout is user
+//! specified and usually easier to work with than a `@Struct` refied type. This
+//! library is Layout agnostic. Any zig struct will work.
+//!
+//! # Tradeoff
+//!
+//! Possible padding after fixed fields (compared with
+//! [resizable-struct](https://codeberg.org/ziglang/zig/pulls/30823) where all
+//! fields are ordered with descending alignment) for constant time field
+//! access.
+//!
+//! # Buffer layout
+//! Given a user `Layout` (fixed fields), the buffer format is:
+//!```
+//! [ fixed fields | fixed padding | flexible fields | flexible padding ]
+//! ^ ALIGN                        ^ FLEX_ALIGN                         ^ ALIGN
+//!```
+//!
+//! # Use
+//!
+//! A Layout decl 'pub coonst flexible_array_capacities` maps flexible
+//! fields to their cached or computed capacities.
+//!
+//! ```zig
+//! ```
+//!
+//! # Prior Art - References
+//!
+//! 1. https://tristanpemble.com/resizable-structs-in-zig/
+//! 2. https://codeberg.org/ziglang/zig/pulls/30823
+//!
+//! # TODOS - IDEAS
+//!
+//! - Options
+//!   - user overrides for methods such as calcOffsets.
+//! - reduce binary footprint
+//!     - remove inline loops and comptime params.
+//! - de/serialization helpers.
+//! - when fixed padding is large enough for a 'buffer_capacity' Size, add a
+//! managed API with resize, resizeAssumeCapacity, resizeBounded and a hidden
+//! field helper.
+
 pub const Options = struct {
     /// size used for offset calculations and methods such as `sizeInBytes`.
     /// smaller types may be used for smaller address spaces and may be faster.
     Size: type = usize,
 };
 
-/// # Features
-///
-/// 1. Constant time field access.
-/// 1. APIs: Layout, Self and bytes.  Users can ptrCast between them.
-/// 1. Computed fields.
-/// 1. LSP cooperation. Avoid created/refified types which break autocomplete.
-///
-/// # About
-///
-/// A single buffer layout library for structs with flexible fields. User
-/// specified `Layout` fields (with order determined by zig) are first in
-/// memory. Flexible fields are second and sorted by descending alignment. This
-/// ordering with no padding between flexible fields allows flexible offsets to
-/// be calculated in constant time (see `calcOffsets()`).
-///
-/// # Cached Layout API
-///
-/// The core methods `calcOffsetsLayout` and `flexibleCapacities` accept a
-/// Layout. Layouts are first class in addition to Self. Layout is user
-/// specified and usually easier to work with than a `@Struct` refied type. This
-/// library is Layout agnostic. Any zig struct will work.
-///
-/// # Tradeoff
-///
-/// Possible padding after fixed fields (compared with
-/// [resizable-struct](https://codeberg.org/ziglang/zig/pulls/30823) where all
-/// fields are ordered with descending alignment) for constant time field
-/// access.
-///
-/// # Buffer layout
-/// Given a user `Layout` (fixed fields), the buffer format is:
-///```
-/// [ fixed fields | fixed padding | flexible fields | flexible padding ]
-/// ^ ALIGN                        ^ FLEX_ALIGN                         ^ ALIGN
-///```
-///
-/// # Use
-///
-/// A Layout decl 'pub coonst flexible_array_capacities` maps flexible
-/// fields to their cached or computed capacities.
-///
-/// ```zig
-/// ```
-///
-/// # Prior Art - References
-///
-/// 1. https://tristanpemble.com/resizable-structs-in-zig/
-/// 3. https://codeberg.org/ziglang/zig/pulls/30823
-///
-/// # TODOS - IDEAS
-///
-/// - Options
-///   - user overrides for methods such as calcOffsets.
-/// - reduce binary footprint
-///     - remove inline loops and comptime params.
-/// - de/serialization helpers.
-/// - when fixed padding is large enough for a 'buffer_capacity' Size, add a
-/// managed API with resize, resizeAssumeCapacity, resizeBounded and a hidden
-/// field helper.
 pub fn Struct(LayoutT: type, options: Options) type {
     return struct {
         /// align Self pointers so we can omit `align` attributes.
@@ -548,9 +549,9 @@ test Struct {
     const layout = try Model.initBuffer(&buf, &initlayout);
     try testing.expectEqual(42, layout.slice(.flexible).len);
     try testing.expectEqual(42, layout.value(.capacity));
-    try testing.expectEqual(42, layout.asLayout().capacity);
+    try testing.expectEqual(42, layout.asLayout().capacity); // Self <-> Layout
     try testing.expectEqual(42, Model.fromLayout(layout.asLayout()).slice(.flexible).len); // Self <-> Layout
-    try testing.expectEqual(68, layout.slice(.computed).len);
+    try testing.expectEqual(68, layout.slice(.computed).len); // computed
 
     try testPacket(usize);
     try testPacket(u32);
